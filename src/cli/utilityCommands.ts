@@ -1,4 +1,6 @@
+import { projectCliAnalysisResult } from "./projectCliAnalysisResult.js";
 import { z } from "incur";
+import { cliIntegerArgument } from "./options.js";
 
 import type { DirectAnalysis } from "../composition/directAnalysis.js";
 import type { ReferenceSourcePolicy } from "../domain/referenceSourcePolicy.js";
@@ -22,6 +24,7 @@ import { PRODUCT_IDENTITY } from "../identity.js";
 import { isCliOperationFailure, logCliCommand } from "../cliLogging.js";
 import { CLI_COMMANDS } from "../cliCommandNames.js";
 import { swiftSymbolsSchema } from "../contracts/native/nativeToolContracts.js";
+import { localPathStringSchema } from "../domain/localPath.js";
 import type { Logger } from "pino";
 import type { CliInstance } from "./types.js";
 import { registerNativeCallCommands } from "./nativeCallCommands.js";
@@ -40,13 +43,22 @@ export const registerUtilityCommands = (
   registerReferenceSourceCommand(cli, logger, environment);
 };
 
+/**
+ * A native deadline option keeps the shared field's bounds but admits only
+ * decimal argv text; Incur's Number() coercion would accept "0x10" or "1e3".
+ */
+const cliNativeDeadline = (field: typeof nativeUiDeadlineField) =>
+  cliIntegerArgument(1)
+    .pipe(field.unwrap())
+    .optional()
+    .describe(field.description ?? "");
+
+// Decimal tokens only, for the same reason as cliNativeDeadline.
 const nativeUiScopeOptions = {
-  pid: z.number().int().positive().describe("Existing application PID"),
-  windowId: z
-    .number()
-    .int()
-    .positive()
-    .describe("Exact selected application window ID"),
+  pid: cliIntegerArgument(1).describe("Existing application PID"),
+  windowId: cliIntegerArgument(1).describe(
+    "Exact selected application window ID",
+  ),
   screenshot: z
     .boolean()
     .default(true)
@@ -55,14 +67,10 @@ const nativeUiScopeOptions = {
     .boolean()
     .default(true)
     .describe("Read the selected window accessibility tree"),
-  maxNodes: z
-    .number()
-    .int()
-    .positive()
-    .safe()
+  maxNodes: cliIntegerArgument(1)
     .default(500)
     .describe("Maximum accessibility nodes per capture"),
-  nativeUiDeadlineMs: nativeUiDeadlineField,
+  nativeUiDeadlineMs: cliNativeDeadline(nativeUiDeadlineField),
 };
 
 const nativeUiScope = (options: {
@@ -94,7 +102,7 @@ const registerNativeUiCommands = (
   runProviderAnalysis: DirectAnalysis["runProviderAnalysis"],
 ): void => {
   const pathArgument = z.object({
-    path: z.string().describe("Local native executable or app path"),
+    path: localPathStringSchema.describe("Local native executable or app path"),
   });
   cli.command(CLI_COMMANDS.observeNativeUi, {
     description:
@@ -108,7 +116,7 @@ const registerNativeUiCommands = (
           "observe_native_ui",
           nativeUiScope(options),
           logger,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
   });
   const operation = "capture_native_ui_scenario";
@@ -152,7 +160,7 @@ const registerNativeUiCommands = (
             ? scenario
             : { ...scenario, native_ui_deadline_ms: deadline },
           logger,
-        );
+        ).then(projectCliAnalysisResult);
       }),
   });
 };
@@ -196,9 +204,11 @@ const registerNativeCommands = (
   ] as const) {
     cli.command(command, {
       description: `Run ${tool} without launching Hopper`,
-      args: z.object({ path: z.string().describe("Mach-O or app path") }),
+      args: z.object({
+        path: localPathStringSchema.describe("Mach-O or app path"),
+      }),
       options: z.object({
-        nativeCommandTimeoutMs: nativeCommandTimeoutField,
+        nativeCommandTimeoutMs: cliNativeDeadline(nativeCommandTimeoutField),
       }),
       run: ({ args, options }) =>
         logCliCommand(logger, command, () =>
@@ -209,13 +219,15 @@ const registerNativeCommands = (
               ? {}
               : { native_command_timeout_ms: options.nativeCommandTimeoutMs },
             logger,
-          ),
+          ).then(projectCliAnalysisResult),
         ),
     });
   }
   cli.command(CLI_COMMANDS.inspectPlist, {
     description: "Parse app plist metadata without launching Hopper",
-    args: z.object({ path: z.string().describe("App or Mach-O path") }),
+    args: z.object({
+      path: localPathStringSchema.describe("App or Mach-O path"),
+    }),
     options: z.object({
       relativePath: z
         .string()
@@ -223,7 +235,7 @@ const registerNativeCommands = (
         .describe(
           "Plist path relative to the app root, or an absolute path (default: the bundle's Info.plist)",
         ),
-      nativeCommandTimeoutMs: nativeCommandTimeoutField,
+      nativeCommandTimeoutMs: cliNativeDeadline(nativeCommandTimeoutField),
     }),
     run: ({ args, options }) =>
       logCliCommand(logger, "inspect-plist", () =>
@@ -239,17 +251,19 @@ const registerNativeCommands = (
               : { native_command_timeout_ms: options.nativeCommandTimeoutMs }),
           },
           logger,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
   });
   cli.command(CLI_COMMANDS.demangleSwift, {
     description: "Demangle Swift symbols without Hopper",
     args: z.object({
-      path: z.string().describe("Artifact path used for evidence identity"),
+      path: localPathStringSchema.describe(
+        "Artifact path used for evidence identity",
+      ),
       symbols: swiftSymbolsSchema.describe("Swift mangled symbols to demangle"),
     }),
     options: z.object({
-      nativeCommandTimeoutMs: nativeCommandTimeoutField,
+      nativeCommandTimeoutMs: cliNativeDeadline(nativeCommandTimeoutField),
     }),
     run: ({ args, options }) =>
       logCliCommand(logger, "demangle-swift", () =>
@@ -263,7 +277,7 @@ const registerNativeCommands = (
               : { native_command_timeout_ms: options.nativeCommandTimeoutMs }),
           },
           logger,
-        ),
+        ).then(projectCliAnalysisResult),
       ),
   });
 };
@@ -287,13 +301,7 @@ const registerReferenceSourceCommand = (
         .describe(
           "Complete committed graph or compact historical-source summary",
         ),
-      outlineDepth: z
-        .number()
-        .int()
-        .safe()
-        // After .safe(): its safe-range check overwrites an earlier minimum,
-        // which advertised negative depths the parser rejects.
-        .nonnegative()
+      outlineDepth: cliIntegerArgument(0)
         .optional()
         .describe(
           "Summary outline path depth (default: 2; 0 omits entries); requires --detail summary",
